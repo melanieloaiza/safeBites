@@ -1,1 +1,22 @@
+-- Melanie R Loaiza 
+-- POPULATE TYPE SCD 1 (inspectionTypedim, citiesdim, weekdim) DDL : 
 
+-- 1. Populate citiesdim table :   
+INSERT INTO citiesdim (citiesid, citiesname)
+SELECT  ROW_NUMBER() OVER (ORDER BY city) AS citiesid, city
+FROM (SELECT DISTINCT city FROM inspectionfact_staging); 
+
+-- 2. Populate weekdim table : 
+INSERT INTO weekdim (week, dateofweek, month, year)
+SELECT DISTINCT 
+    EXTRACT(WEEK FROM record_date)::INT AS week,
+    DATE_TRUNC('week', record_date)::DATE AS dateofweek,  
+    EXTRACT(MONTH FROM DATE_TRUNC('week', record_date))::INT AS month,
+    EXTRACT(YEAR FROM record_date)::INT AS year
+FROM inspectionfact_staging
+ORDER BY year, week;
+
+-- 3. Populate violationcategorydim table :    
+INSERT INTO violationcategorydim (violcateogoryid, violcateogory)
+SELECT  ROW_NUMBER() OVER (ORDER BY violation_category) AS violcateogoryid, violation_category
+FROM (SELECT DISTINCT violation_category FROM inspectionfact_staging);
