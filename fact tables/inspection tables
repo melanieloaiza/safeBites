@@ -1,0 +1,141 @@
+-- Melanie R Loaiza 
+-- INSPECTIONS FACT STORED PROCEDURES : 
+
+-- 1. ******* sp_insert_inspectionsfact 
+--DROP PROCEDURE IF EXISTS sp_insert_inspectionsfact;
+--CALL sp_insert_inspectionsfact(); 
+
+CREATE OR REPLACE PROCEDURE sp_insert_inspectionsfact()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+
+    INSERT INTO inspectionsfact (
+        restaurantdim_id,
+        violationdim_id,
+        locationdim_id,
+        inspectiondatedim_id,
+        recorddatedim_id,
+        criticalFlag,
+        notCriticalFlag,
+        totalViolations,
+        score,
+        violStatus,
+        isClosed,
+        isReopen
+    )
+    SELECT
+        restaurantdim.restaurantdim_id,
+        violdescription.violationdim_id,
+        locationdim.locationdim_id,
+        d1.datedim_id AS inspectiondatedim_id,
+        d2.datedim_id AS recorddatedim_id, 
+
+        CASE WHEN inspectionfact_staging.viol_level = 'Critical' THEN 1 ELSE 0 END AS criticalFlag,
+        CASE WHEN inspectionfact_staging.viol_level = 'Not Critical' THEN 1 ELSE 0 END AS notCriticalFlag, 
+		1 AS totalViolations,  
+        inspectionfact_staging.score,
+        CASE WHEN LOWER(inspectionfact_staging.viol_status) = 'fail' THEN 1 ELSE 0 END AS violStatus,
+        CASE WHEN LOWER(inspectionfact_staging.action) = 'closed' THEN 1 ELSE 0 END AS isClosed,
+        CASE WHEN LOWER(inspectionfact_staging.action) = 're-open' THEN 1 ELSE 0 END AS isReopen
+
+    FROM inspectionfact_staging 
+
+    LEFT JOIN (SELECT DISTINCT ON (restaurantname, cuisinedescription) restaurantdim_id, restaurantname, cuisinedescription
+        FROM restaurantdim
+        WHERE currentflag = TRUE) restaurantdim
+    ON inspectionfact_staging.restaurantname = restaurantdim.restaurantname
+    AND inspectionfact_staging.cuisinedescription = restaurantdim.cuisinedescription
+
+    LEFT JOIN (SELECT DISTINCT ON (violdescription) violationdim_id, violdescription FROM violationdim) violdescription
+    ON inspectionfact_staging.violdesc = violdescription.violdescription
+
+    LEFT JOIN (SELECT DISTINCT ON (locationaddress_current, city, state, postalcode) locationdim_id, locationaddress_current, city, state, postalcode FROM locationdim) locationdim
+    ON  inspectionfact_staging.address = locationdim.locationaddress_current
+    AND inspectionfact_staging.city = locationdim.city
+    AND inspectionfact_staging.state = locationdim.state
+    AND inspectionfact_staging.zip = locationdim.postalcode
+
+    LEFT JOIN (SELECT DISTINCT ON (date) datedim_id, date FROM datedim) d1 
+    ON inspectionfact_staging.violdttm = d1.date
+
+    LEFT JOIN (SELECT DISTINCT ON (date) datedim_id, date FROM datedim) d2 
+    ON inspectionfact_staging.record_date = d2.date
+
+	WHERE 
+        restaurantdim.restaurantdim_id IS NOT NULL AND
+        violdescription.violationdim_id IS NOT NULL AND
+        locationdim.locationdim_id IS NOT NULL AND
+        d1.datedim_id IS NOT NULL AND
+        d2.datedim_id IS NOT NULL;
+
+END;
+$$;
+
+-- 2. ******* sp_insert_inspectioncategoryfact 
+--DROP PROCEDURE IF EXISTS sp_insert_inspectioncategoryfact;
+--CALL sp_insert_inspectioncategoryfact();  
+
+CREATE OR REPLACE PROCEDURE sp_insert_inspectioncategoryfact()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO inspectioncategoryfact (
+        restaurantdim_id,
+        violationdim_id,
+        citiesdim_id,
+        violcateogorydim_id,
+        weekdim_id,
+        totalViolations,
+        avgViolations,
+        totalPass,
+        totalFail
+    )
+    SELECT
+        restaurantDIM.restaurantdim_id,
+        violationDIM.violationdim_id,
+        citiesDIM.citiesdim_id,
+        violationCategoryDIM.violcateogorydim_id,
+        weekDIM.weekdim_id,
+
+        COUNT(*) AS totalViolations,
+        AVG(inspectionfact_staging.score)::NUMERIC(5,2) AS avgViolations,
+        COUNT(CASE WHEN LOWER(inspectionfact_staging.viol_status) = 'pass' THEN 1 END) AS totalPass,
+        COUNT(CASE WHEN LOWER(inspectionfact_staging.viol_status) = 'fail' THEN 1 END) AS totalFail
+
+    FROM inspectionfact_staging 
+
+    LEFT JOIN restaurantDIM  ON inspectionfact_staging.restaurantname = restaurantDIM.restaurantname
+       	AND inspectionfact_staging.cuisinedescription = restaurantDIM.cuisinedescription
+        AND restaurantDIM.currentflag = TRUE
+
+    LEFT JOIN violationDIM ON inspectionfact_staging.violdesc = violationDIM.violdescription
+    LEFT JOIN citiesDIM ON inspectionfact_staging.city = citiesDIM.citiesname
+    LEFT JOIN violationCategoryDIM ON inspectionfact_staging.violation_category = violationCategoryDIM.violcateogory
+
+    LEFT JOIN weekDIM 
+        ON EXTRACT(WEEK FROM inspectionfact_staging.record_date)::INT = weekDIM.week
+       AND EXTRACT(YEAR FROM inspectionfact_staging.record_date)::INT = weekDIM.year
+
+-- I NEEDED TO ADD THIS SO I CAN DO THE WHOLE CYCLE TEST INCLUDING AND TO NOT INCLUDE THE RECORDS
+-- I INSERTED MANUALLY. 
+
+    WHERE 
+        restaurantDIM.restaurantdim_id IS NOT NULL AND
+        violationDIM.violationdim_id IS NOT NULL AND
+        citiesDIM.citiesdim_id IS NOT NULL AND
+        violationCategoryDIM.violcateogorydim_id IS NOT NULL AND
+        weekDIM.weekdim_id IS NOT NULL
+
+    GROUP BY
+        restaurantDIM.restaurantdim_id,
+        violationDIM.violationdim_id,
+        citiesDIM.citiesdim_id,
+        violationCategoryDIM.violcateogorydim_id,
+        weekDIM.weekdim_id;
+
+END;
+$$;
+
+--select  * from restaurantDIM;  
+--select * from inspectioncategoryfact; 
