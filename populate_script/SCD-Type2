@@ -1,1 +1,79 @@
+-- Melanie R Loaiza 
+-- RESTAURANT STORED PROCEDURES : 
+
+-- ******* sp_bostonrestaurantDIM 
+--DROP PROCEDURE IF EXISTS sp_bostonrestaurantDIM;
+--CALL sp_bostonrestaurantDIM();   
+
+CREATE OR REPLACE PROCEDURE sp_bostonrestaurantDIM()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+
+    UPDATE restaurantDIM target
+    SET currentFlag = FALSE,
+        expiredDate = CURRENT_DATE
+    FROM boston_restaurantstaging source
+	WHERE target.currentFlag = TRUE
+  		AND target.sourcesystem = source.sourcesystem
+  		AND target.restaurant_id = source.restaurant_id
+  		AND (
+      		target.restaurantName IS DISTINCT FROM source.boston_restaurantName
+      		OR target.cuisineDescription IS DISTINCT FROM source.boston_cuisineDescription
+  			);
+
+    INSERT INTO restaurantDIM ( restaurant_id, restaurantName, cuisineDescription, effectiveDate,
+        expiredDate, currentFlag, sourcesystem)
+    SELECT 
+        source.restaurant_id,   source.boston_restaurantName, source.boston_cuisineDescription,
+        CURRENT_DATE, '9999-12-31', TRUE, source.sourcesystem
+    FROM boston_restaurantstaging source
+    LEFT JOIN restaurantDIM target ON target.restaurant_id = source.restaurant_id
+       AND target.currentFlag = TRUE
+       AND target.restaurantName = source.boston_restaurantName
+       AND target.cuisineDescription = source.boston_cuisineDescription
+       AND target.sourcesystem = source.sourcesystem
+    WHERE target.restaurant_id IS NULL;  
+
+    TRUNCATE TABLE boston_restaurantstaging;
+END;
+$$;
+
+-- ******* sp_nycrestaurantDIM 
+--DROP PROCEDURE IF EXISTS sp_nycrestaurantDIM;
+--CALL sp_nycrestaurantDIM();  
+
+CREATE OR REPLACE PROCEDURE sp_nycrestaurantDIM()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+
+    UPDATE restaurantDIM target
+    SET currentFlag = FALSE,
+        expiredDate = CURRENT_DATE
+    FROM nyc_restaurantstaging source
+    WHERE target.currentFlag = TRUE
+      AND target.sourcesystem = source.sourcesystem
+      AND target.restaurant_id = source.restaurant_id
+      AND (
+          target.restaurantName IS DISTINCT FROM source.nyc_restaurantName
+          OR target.cuisineDescription IS DISTINCT FROM source.nyc_cuisineDescription
+      );
+
+    INSERT INTO restaurantDIM (restaurant_id, restaurantName, cuisineDescription, effectiveDate,
+        expiredDate, currentFlag, sourcesystem)
+    SELECT 
+        source.restaurant_id, source.nyc_restaurantName, source.nyc_cuisineDescription,
+        CURRENT_DATE, '9999-12-31', TRUE, source.sourcesystem
+    FROM nyc_restaurantstaging source
+    LEFT JOIN restaurantDIM target ON target.restaurant_id = source.restaurant_id
+       AND target.currentFlag = TRUE
+       AND target.restaurantName = source.nyc_restaurantName
+       AND target.cuisineDescription = source.nyc_cuisineDescription
+       AND target.sourcesystem = source.sourcesystem
+    WHERE target.restaurant_id IS NULL;
+
+    TRUNCATE TABLE nyc_restaurantstaging;
+END;
+$$;
 
