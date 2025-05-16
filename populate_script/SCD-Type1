@@ -1,22 +1,199 @@
 -- Melanie R Loaiza 
--- POPULATE TYPE SCD 1 (inspectionTypedim, citiesdim, weekdim) DDL : 
+-- VIOLATION STORED PROCEDURES : 
 
--- 1. Populate citiesdim table :   
-INSERT INTO citiesdim (citiesid, citiesname)
-SELECT  ROW_NUMBER() OVER (ORDER BY city) AS citiesid, city
-FROM (SELECT DISTINCT city FROM inspectionfact_staging); 
+-- 1. ******* sp_insert_violationstaging 
+--DROP PROCEDURE IF EXISTS sp_insert_violationstaging;
+--CALL sp_insert_violationstaging();   
 
--- 2. Populate weekdim table : 
-INSERT INTO weekdim (week, dateofweek, month, year)
-SELECT DISTINCT 
-    EXTRACT(WEEK FROM record_date)::INT AS week,
-    DATE_TRUNC('week', record_date)::DATE AS dateofweek,  
-    EXTRACT(MONTH FROM DATE_TRUNC('week', record_date))::INT AS month,
-    EXTRACT(YEAR FROM record_date)::INT AS year
-FROM inspectionfact_staging
-ORDER BY year, week;
+CREATE SEQUENCE IF NOT EXISTS violation_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    CACHE 1;
+	
+ALTER SEQUENCE violation_id_seq RESTART WITH 1;
 
--- 3. Populate violationcategorydim table :    
-INSERT INTO violationcategorydim (violcateogoryid, violcateogory)
-SELECT  ROW_NUMBER() OVER (ORDER BY violation_category) AS violcateogoryid, violation_category
-FROM (SELECT DISTINCT violation_category FROM inspectionfact_staging);
+CREATE OR REPLACE PROCEDURE sp_insert_violationstaging()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    max_violationid INT;
+BEGIN
+
+    SELECT COALESCE(MAX(violationid), 0) + 1 INTO max_violationid FROM violationdim;
+    PERFORM setval('violation_id_seq', max_violationid, false);
+
+    INSERT INTO violation_staging (
+        violationid, violationsdesc, legal_reference, detection_method, violation_category, common_cause
+    )
+    SELECT 
+        COALESCE(violationdim.violationid, nextval('violation_id_seq')) AS violationid,
+        ispecctionsfact_disctinct.violdesc,
+        ispecctionsfact_disctinct.legal_reference,
+        ispecctionsfact_disctinct.detection_method,
+        ispecctionsfact_disctinct.violation_category,
+        ispecctionsfact_disctinct.common_cause
+    FROM (
+        SELECT DISTINCT violdesc, legal_reference, detection_method, violation_category, common_cause
+        FROM inspectionfact_staging
+        WHERE violdesc IS NOT NULL
+		AND legal_reference IS NOT NULL
+          AND detection_method IS NOT NULL
+          AND violation_category IS NOT NULL
+          AND common_cause IS NOT NULL
+    ) ispecctionsfact_disctinct
+    LEFT JOIN violationdim violationdim
+      ON lower(trim(ispecctionsfact_disctinct.violdesc)) = lower(trim(violationdim.violdescription));
+
+END;
+$$;
+
+-- 2. ******* sp_insert_violationdim 
+--DROP PROCEDURE IF EXISTS sp_insert_violationdim;
+--CALL sp_insert_violationdim(); 
+
+SELECT * FROM violationdim; 
+
+CREATE OR REPLACE PROCEDURE sp_insert_violationdim()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    MERGE INTO violationdim AS target
+    USING (
+        SELECT 
+            violationid, 
+            violationsdesc AS violDescription,
+            legal_reference, 
+            detection_method, 
+            violation_category, 
+            common_cause
+        FROM violation_staging
+    ) AS source
+    --ON lower(trim(target.violdescription)) = lower(trim(source.violDescription))
+	ON target.violationid = source.violationid
+    WHEN MATCHED AND (
+		target.violdescription IS DISTINCT FROM source.violDescription OR
+        target.legal_reference IS DISTINCT FROM source.legal_reference OR
+        target.detection_method IS DISTINCT FROM source.detection_method OR
+        target.violation_category IS DISTINCT FROM source.violation_category OR
+        target.common_cause IS DISTINCT FROM source.common_cause
+    )
+    THEN
+        UPDATE SET
+			violdescription = source.violDescription,
+            legal_reference = source.legal_reference,
+            detection_method = source.detection_method,
+            violation_category = source.violation_category,
+            common_cause = source.common_cause
+    WHEN NOT MATCHED THEN
+        INSERT (
+            violationid, violdescription, legal_reference, detection_method, violation_category, common_cause
+        )
+        VALUES (
+            source.violationid, source.violDescription,
+            source.legal_reference, source.detection_method,
+            source.violation_category, source.common_cause
+        );
+
+    TRUNCATE TABLE violation_staging RESTART IDENTITY;
+    TRUNCATE TABLE nyc_inspectionstaging RESTART IDENTITY;
+    TRUNCATE TABLE boston_inspectionstaging RESTART IDENTITY;
+	
+END;
+$$;
+
+-- 3. ******* sp_nycvioldescription 
+--DROP PROCEDURE IF EXISTS sp_nycvioldescription;
+--CALL sp_nycvioldescription(); 
+
+CREATE OR REPLACE PROCEDURE sp_nycvioldescription()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    --UPDATE inspectionfact_staging
+	UPDATE nyc_inspectionstaging
+    SET violation_description = CASE violation_description
+        WHEN 'Document issued by the Board of Health, Commissioner or Department unlawfully reproduced or altered' THEN 'Altered Health Document'
+        WHEN 'Toxic chemical or pesticide improperly stored or used such that food contamination may occur' THEN 'Toxic Chemical Misuse'
+        WHEN 'Food service operation occurring in room or area used as living or sleeping quarters' THEN 'Food Prep in Living Area'
+        WHEN 'Insufficient or no refrigerated or hot holding equipment to keep potentially hazardous foods at required temperatures' THEN 'Temp Control Equipment Issue'
+        WHEN 'Dishwashing and ware washing: Cleaning and sanitizing of tableware, including dishes, utensils, and equipment deficient' THEN 'Dishwashing Deficiency'
+        --WHEN 'Dishwashing and ware washing: Cleaning and sanitizing of tableware, including dishes, utensils, and equipment deficient' THEN 'THIS IS A TEST!!!!'
+		WHEN 'HACCP plan not approved or approved HACCP plan not maintained on premises' THEN 'HACCP Plan Issue'
+        WHEN 'Mechanical or natural ventilation system not provided, improperly installed, in disrepair and/or fails to prevent excessive build-up of grease, heat, steam condensation vapors, odors, smoke, and fumes' THEN 'Ventilation System Problem'
+        WHEN 'Food worker/food vendor does not wash hands thoroughly after using the toilet, or after coughing, sneezing, smoking, eating, preparing raw foods or otherwise contaminating hands or does not change gloves when required; Worker fails to refrain from smoking or being fully clothed in clean outer garments' THEN 'Handwashing/Personal Hygiene'
+        WHEN 'Non-food contact surface or equipment made of unacceptable material, not kept clean, or not properly sealed, raised, spaced or movable to allow accessibility for cleaning on all sides, above and underneath the unit' THEN 'Improper Surface Construction'
+        WHEN 'Toilet facility not provided for employees or for patrons when required' THEN 'Missing Toilet Facility'
+        ELSE violation_description
+    END;
+
+    --UPDATE inspectionfact_staging
+	UPDATE nyc_inspectionstaging
+    SET 
+        legal_reference = CASE violation_description
+            WHEN 'Altered Health Document' THEN 'LR-NY-100'
+            WHEN 'Toxic Chemical Misuse' THEN 'LR-NY-101'
+            WHEN 'Food Prep in Living Area' THEN 'LR-NY-102'
+            WHEN 'Temp Control Equipment Issue' THEN 'LR-NY-103'
+            WHEN 'Dishwashing Deficiency' THEN 'LR-NY-104'
+			--WHEN 'THIS IS A TEST!!!!' THEN 'THIS IS A TEST'
+            --WHEN 'HACCP Plan Issue' THEN 'LR-NY-105'
+			--WHEN 'HACCP Plan Issue' THEN 'THIS IS A TEST'
+            WHEN 'Ventilation System Problem' THEN 'LR-NY-106'
+            WHEN 'Handwashing/Personal Hygiene' THEN 'LR-NY-107'
+            WHEN 'Improper Surface Construction' THEN 'LR-NY-108'
+            WHEN 'Missing Toilet Facility' THEN 'LR-NY-109'
+            ELSE legal_reference
+        END,
+        detection_method = CASE violation_description
+            WHEN 'Altered Health Document' THEN 'Routine'
+            WHEN 'Toxic Chemical Misuse' THEN 'Complaint'
+            WHEN 'Food Prep in Living Area' THEN 'Investigation'
+            WHEN 'Temp Control Equipment Issue' THEN 'Routine'
+			--WHEN 'THIS IS A TEST!!!!' THEN 'Routine'
+            WHEN 'Dishwashing Deficiency' THEN 'Routine'
+            WHEN 'HACCP Plan Issue' THEN 'Investigation'
+            WHEN 'Ventilation System Problem' THEN 'Routine'
+            WHEN 'Handwashing/Personal Hygiene' THEN 'Routine'
+            WHEN 'Improper Surface Construction' THEN 'Follow-up'
+            WHEN 'Missing Toilet Facility' THEN 'Investigation'
+            ELSE detection_method
+        END,
+        violation_category = CASE violation_description
+            WHEN 'Altered Health Document' THEN 'Documentation'
+            WHEN 'Toxic Chemical Misuse' THEN 'Contamination'
+            WHEN 'Food Prep in Living Area' THEN 'Sanitation'
+            WHEN 'Temp Control Equipment Issue' THEN 'Temperature Control'
+			--WHEN 'THIS IS A TEST!!!!' THEN 'Sanitation'
+            WHEN 'Dishwashing Deficiency' THEN 'Sanitation'
+            WHEN 'HACCP Plan Issue' THEN 'Documentation'
+            WHEN 'Ventilation System Problem' THEN 'Sanitation'
+            WHEN 'Handwashing/Personal Hygiene' THEN 'Hygiene'
+            WHEN 'Improper Surface Construction' THEN 'Sanitation'
+            WHEN 'Missing Toilet Facility' THEN 'Facilities'
+            ELSE violation_category
+        END,
+        common_cause = CASE violation_description
+            WHEN 'Altered Health Document' THEN 'Improper Procedures'
+            WHEN 'Toxic Chemical Misuse' THEN 'Cross Contamination'
+            WHEN 'Food Prep in Living Area' THEN 'Improper Facilities'
+            WHEN 'Temp Control Equipment Issue' THEN 'Equipment Failure'
+			--WHEN 'THIS IS A TEST!!!!' THEN 'Poor Cleaning'
+            WHEN 'Dishwashing Deficiency' THEN 'Poor Cleaning'
+            WHEN 'HACCP Plan Issue' THEN 'Lack of Planning'
+            WHEN 'Ventilation System Problem' THEN 'Equipment Failure'
+            WHEN 'Handwashing/Personal Hygiene' THEN 'Lack of Training'
+            WHEN 'Improper Surface Construction' THEN 'Improper Maintenance'
+            WHEN 'Missing Toilet Facility' THEN 'Improper Facilities'
+            ELSE common_cause
+        END;
+
+		--DELETE FROM inspectionfact_staging
+		DELETE FROM nyc_inspectionstaging
+		WHERE 
+    		violation_description IS NULL OR TRIM(violation_description) = '' OR
+    		legal_reference IS NULL OR TRIM(legal_reference) = '' OR
+    		detection_method IS NULL OR TRIM(detection_method) = '' OR
+    		violation_category IS NULL OR TRIM(violation_category) = '' OR
+    		common_cause IS NULL OR TRIM(common_cause) = '';
+END;
+$$;
